@@ -1,0 +1,44 @@
+{
+  "name": "nft-patents-solana",
+  "version": "1.0.0",
+  "description": "Solana-based Patent NFT Marketplace with SPL tokens and Metaplex integration",
+  "main": "index.js",
+  "scripts": {
+    "lint:fix": "cargo clippy --fix --allow-dirty --allow-staged",
+    "lint": "cargo clippy -- -D warnings",
+    "test": "anchor test",
+    "test:unit": "cargo test",
+    "build": "anchor build",
+    "deploy:localnet": "anchor deploy --provider.cluster localnet",
+    "deploy:devnet": "anchor deploy --provider.cluster devnet",
+    "deploy:mainnet": "anchor deploy --provider.cluster mainnet",
+    "localnet": "solana-test-validator",
+    "clean": "anchor clean && cargo clean"
+  },
+  "keywords": [
+    "solana",
+    "anchor",
+    "nft",
+    "patent",
+    "marketplace",
+    "spl-token"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@coral-xyz/anchor": "^0.29.0",
+    "@metaplex-foundation/mpl-token-metadata": "^3.2.1",
+    "@solana/spl-token": "^0.3.9",
+    "@solana/web3.js": "^1.87.6"
+  },
+  "devDependencies": {
+    "@types/bn.js": "^5.1.5",
+    "@types/chai": "^4.3.11",
+    "@types/mocha": "^10.0.6",
+    "chai": "^4.4.1",
+    "mocha": "^10.2.0",
+    "ts-mocha": "^10.0.0",
+    "typescript": "^5.3.3"
+  }
+}
+

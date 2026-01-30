@@ -1,0 +1,50 @@
+# Anchor
+.anchor
+target/
+**/*.rs.bk
+test-ledger/
+
+# IDL
+*.json
+!package.json
+!tsconfig.json
+
+# Node
+node_modules/
+dist/
+.DS_Store
+
+# Solana
+.config/
+test-ledger/
+
+# Rust
+Cargo.lock
+**/*.rs.bk
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment
+.env
+.env.local
+
+# Build artifacts
+*.so
+*.o
+*.a
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
