@@ -37,11 +37,18 @@ pub mod search_payment {
     /// Pay for AI search with SOL
     pub fn pay_with_sol(ctx: Context<PayWithSOL>) -> Result<()> {
         let state = &ctx.accounts.state;
-        
+
         require!(!state.paused, SearchPaymentError::ContractPaused);
         require!(
             state.search_price_in_sol > 0,
             SearchPaymentError::PriceNotSet
+        );
+
+        // Verify user has sufficient balance
+        let user_balance = ctx.accounts.user.to_account_info().lamports();
+        require!(
+            user_balance >= state.search_price_in_sol,
+            SearchPaymentError::InsufficientFunds
         );
 
         // Transfer SOL from user to program
@@ -58,10 +65,16 @@ pub mod search_payment {
             ],
         )?;
 
-        // Update user stats
+        // Update user stats with overflow protection
         let user_stats = &mut ctx.accounts.user_stats;
-        user_stats.sol_paid += state.search_price_in_sol;
-        user_stats.searches_purchased += state.searches_per_payment;
+        user_stats.sol_paid = user_stats
+            .sol_paid
+            .checked_add(state.search_price_in_sol)
+            .ok_or(SearchPaymentError::MathOverflow)?;
+        user_stats.searches_purchased = user_stats
+            .searches_purchased
+            .checked_add(state.searches_per_payment)
+            .ok_or(SearchPaymentError::MathOverflow)?;
 
         emit!(PaymentReceived {
             user: ctx.accounts.user.key(),
@@ -77,11 +90,33 @@ pub mod search_payment {
     /// Pay for AI search with USDC
     pub fn pay_with_usdc(ctx: Context<PayWithUSDC>) -> Result<()> {
         let state = &ctx.accounts.state;
-        
+
         require!(!state.paused, SearchPaymentError::ContractPaused);
         require!(
             state.search_price_in_usdc > 0,
             SearchPaymentError::PriceNotSet
+        );
+
+        // Verify token accounts match expected mint
+        require!(
+            ctx.accounts.user_usdc_account.mint == state.usdc_token_mint,
+            SearchPaymentError::InvalidTokenAccount
+        );
+        require!(
+            ctx.accounts.program_usdc_account.mint == state.usdc_token_mint,
+            SearchPaymentError::InvalidTokenAccount
+        );
+
+        // Verify token account ownership
+        require!(
+            ctx.accounts.user_usdc_account.owner == ctx.accounts.user.key(),
+            SearchPaymentError::InvalidTokenAccount
+        );
+
+        // Verify user has sufficient balance
+        require!(
+            ctx.accounts.user_usdc_account.amount >= state.search_price_in_usdc,
+            SearchPaymentError::InsufficientFunds
         );
 
         // Transfer USDC from user to program
@@ -94,10 +129,16 @@ pub mod search_payment {
         let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
         token::transfer(cpi_ctx, state.search_price_in_usdc)?;
 
-        // Update user stats
+        // Update user stats with overflow protection
         let user_stats = &mut ctx.accounts.user_stats;
-        user_stats.usdc_paid += state.search_price_in_usdc;
-        user_stats.searches_purchased += state.searches_per_payment;
+        user_stats.usdc_paid = user_stats
+            .usdc_paid
+            .checked_add(state.search_price_in_usdc)
+            .ok_or(SearchPaymentError::MathOverflow)?;
+        user_stats.searches_purchased = user_stats
+            .searches_purchased
+            .checked_add(state.searches_per_payment)
+            .ok_or(SearchPaymentError::MathOverflow)?;
 
         emit!(PaymentReceived {
             user: ctx.accounts.user.key(),
@@ -113,11 +154,33 @@ pub mod search_payment {
     /// Pay for AI search with PSP tokens
     pub fn pay_with_psp(ctx: Context<PayWithPSP>) -> Result<()> {
         let state = &ctx.accounts.state;
-        
+
         require!(!state.paused, SearchPaymentError::ContractPaused);
         require!(
             state.search_price_in_psp > 0,
             SearchPaymentError::PriceNotSet
+        );
+
+        // Verify token accounts match expected mint
+        require!(
+            ctx.accounts.user_psp_account.mint == state.psp_token_mint,
+            SearchPaymentError::InvalidTokenAccount
+        );
+        require!(
+            ctx.accounts.program_psp_account.mint == state.psp_token_mint,
+            SearchPaymentError::InvalidTokenAccount
+        );
+
+        // Verify token account ownership
+        require!(
+            ctx.accounts.user_psp_account.owner == ctx.accounts.user.key(),
+            SearchPaymentError::InvalidTokenAccount
+        );
+
+        // Verify user has sufficient balance
+        require!(
+            ctx.accounts.user_psp_account.amount >= state.search_price_in_psp,
+            SearchPaymentError::InsufficientFunds
         );
 
         // Transfer PSP from user to program
@@ -130,10 +193,16 @@ pub mod search_payment {
         let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
         token::transfer(cpi_ctx, state.search_price_in_psp)?;
 
-        // Update user stats
+        // Update user stats with overflow protection
         let user_stats = &mut ctx.accounts.user_stats;
-        user_stats.psp_paid += state.search_price_in_psp;
-        user_stats.searches_purchased += state.searches_per_payment;
+        user_stats.psp_paid = user_stats
+            .psp_paid
+            .checked_add(state.search_price_in_psp)
+            .ok_or(SearchPaymentError::MathOverflow)?;
+        user_stats.searches_purchased = user_stats
+            .searches_purchased
+            .checked_add(state.searches_per_payment)
+            .ok_or(SearchPaymentError::MathOverflow)?;
 
         emit!(PaymentReceived {
             user: ctx.accounts.user.key(),
@@ -206,12 +275,22 @@ pub mod search_payment {
 
     /// Withdraw SOL from contract
     pub fn withdraw_sol(ctx: Context<WithdrawSOL>, amount: u64) -> Result<()> {
+        require!(amount > 0, SearchPaymentError::InvalidAmount);
+
+        let state_account = ctx.accounts.state.to_account_info();
+
+        // Calculate minimum rent-exempt balance
+        let rent = Rent::get()?;
+        let min_balance = rent.minimum_balance(state_account.data_len());
+
+        // Ensure we don't withdraw below rent-exempt minimum
+        let current_balance = state_account.lamports();
         require!(
-            ctx.accounts.state.to_account_info().lamports() >= amount,
+            current_balance >= amount.checked_add(min_balance).ok_or(SearchPaymentError::MathOverflow)?,
             SearchPaymentError::InsufficientBalance
         );
 
-        **ctx.accounts.state.to_account_info().try_borrow_mut_lamports()? -= amount;
+        **state_account.try_borrow_mut_lamports()? -= amount;
         **ctx.accounts.authority.to_account_info().try_borrow_mut_lamports()? += amount;
 
         emit!(TokensWithdrawn {
@@ -512,6 +591,14 @@ pub enum SearchPaymentError {
     InsufficientBalance,
     #[msg("Cannot update SOL address")]
     CannotUpdateSOL,
+    #[msg("Insufficient funds")]
+    InsufficientFunds,
+    #[msg("Invalid token account")]
+    InvalidTokenAccount,
+    #[msg("Math overflow")]
+    MathOverflow,
+    #[msg("Invalid amount")]
+    InvalidAmount,
 }
 
 

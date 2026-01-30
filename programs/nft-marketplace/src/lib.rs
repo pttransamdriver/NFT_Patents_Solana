@@ -34,7 +34,12 @@ pub mod nft_marketplace {
         require!(price > 0, MarketplaceError::InvalidPrice);
 
         let state = &mut ctx.accounts.state;
-        state.listing_count += 1;
+
+        // Overflow protection for listing count
+        state.listing_count = state
+            .listing_count
+            .checked_add(1)
+            .ok_or(MarketplaceError::MathOverflow)?;
 
         let listing = &mut ctx.accounts.listing;
         listing.listing_id = state.listing_count;
@@ -43,6 +48,22 @@ pub mod nft_marketplace {
         listing.price = price;
         listing.active = true;
         listing.bump = ctx.bumps.listing;
+
+        // Verify token accounts match the NFT mint
+        require!(
+            ctx.accounts.seller_nft_account.mint == ctx.accounts.nft_mint.key(),
+            MarketplaceError::InvalidTokenAccount
+        );
+        require!(
+            ctx.accounts.escrow_nft_account.mint == ctx.accounts.nft_mint.key(),
+            MarketplaceError::InvalidTokenAccount
+        );
+
+        // Verify seller owns the NFT
+        require!(
+            ctx.accounts.seller_nft_account.amount >= 1,
+            MarketplaceError::InsufficientNFTBalance
+        );
 
         // Transfer NFT to escrow
         let cpi_accounts = Transfer {
@@ -67,7 +88,7 @@ pub mod nft_marketplace {
     /// Buy an NFT
     pub fn buy_nft(ctx: Context<BuyNFT>) -> Result<()> {
         let listing = &mut ctx.accounts.listing;
-        
+
         require!(listing.active, MarketplaceError::ListingNotActive);
         require!(
             ctx.accounts.buyer.key() != listing.seller,
@@ -75,24 +96,39 @@ pub mod nft_marketplace {
         );
 
         let state = &ctx.accounts.state;
-        
+
         // Calculate fees
         let platform_fee = (listing.price as u128)
             .checked_mul(state.platform_fee_percent as u128)
             .ok_or(MarketplaceError::MathOverflow)?
             .checked_div(10000)
             .ok_or(MarketplaceError::MathOverflow)? as u64;
-        
+
         let seller_amount = listing.price
             .checked_sub(platform_fee)
             .ok_or(MarketplaceError::MathOverflow)?;
 
-        // Transfer SOL from buyer to seller
-        **ctx.accounts.buyer.to_account_info().try_borrow_mut_lamports()? -= listing.price;
-        **ctx.accounts.seller.to_account_info().try_borrow_mut_lamports()? += seller_amount;
-        **ctx.accounts.fee_recipient.to_account_info().try_borrow_mut_lamports()? += platform_fee;
+        // CRITICAL FIX: Mark listing as inactive FIRST to prevent reentrancy
+        listing.active = false;
 
-        // Transfer NFT from escrow to buyer
+        // Verify buyer has sufficient balance
+        let buyer_balance = ctx.accounts.buyer.to_account_info().lamports();
+        require!(
+            buyer_balance >= listing.price,
+            MarketplaceError::InsufficientFunds
+        );
+
+        // Verify token accounts match the NFT mint
+        require!(
+            ctx.accounts.buyer_nft_account.mint == listing.nft_mint,
+            MarketplaceError::InvalidTokenAccount
+        );
+        require!(
+            ctx.accounts.escrow_nft_account.mint == listing.nft_mint,
+            MarketplaceError::InvalidTokenAccount
+        );
+
+        // Transfer NFT from escrow to buyer FIRST (fail fast)
         let seeds = &[
             b"listing",
             listing.nft_mint.as_ref(),
@@ -109,7 +145,10 @@ pub mod nft_marketplace {
         let cpi_ctx = CpiContext::new_with_signer(cpi_program, cpi_accounts, signer);
         token::transfer(cpi_ctx, 1)?;
 
-        listing.active = false;
+        // Transfer SOL from buyer to seller and fee recipient
+        **ctx.accounts.buyer.to_account_info().try_borrow_mut_lamports()? -= listing.price;
+        **ctx.accounts.seller.to_account_info().try_borrow_mut_lamports()? += seller_amount;
+        **ctx.accounts.fee_recipient.to_account_info().try_borrow_mut_lamports()? += platform_fee;
 
         emit!(NFTSold {
             listing_id: listing.listing_id,
@@ -125,8 +164,21 @@ pub mod nft_marketplace {
     /// Cancel a listing
     pub fn cancel_listing(ctx: Context<CancelListing>) -> Result<()> {
         let listing = &mut ctx.accounts.listing;
-        
+
         require!(listing.active, MarketplaceError::ListingNotActive);
+
+        // Mark as inactive FIRST to prevent reentrancy
+        listing.active = false;
+
+        // Verify token accounts match the NFT mint
+        require!(
+            ctx.accounts.seller_nft_account.mint == listing.nft_mint,
+            MarketplaceError::InvalidTokenAccount
+        );
+        require!(
+            ctx.accounts.escrow_nft_account.mint == listing.nft_mint,
+            MarketplaceError::InvalidTokenAccount
+        );
 
         // Transfer NFT back to seller
         let seeds = &[
@@ -144,8 +196,6 @@ pub mod nft_marketplace {
         let cpi_program = ctx.accounts.token_program.to_account_info();
         let cpi_ctx = CpiContext::new_with_signer(cpi_program, cpi_accounts, signer);
         token::transfer(cpi_ctx, 1)?;
-
-        listing.active = false;
 
         emit!(ListingCancelled {
             listing_id: listing.listing_id,
@@ -390,6 +440,12 @@ pub enum MarketplaceError {
     MathOverflow,
     #[msg("Unauthorized")]
     Unauthorized,
+    #[msg("Insufficient funds")]
+    InsufficientFunds,
+    #[msg("Invalid token account")]
+    InvalidTokenAccount,
+    #[msg("Insufficient NFT balance")]
+    InsufficientNFTBalance,
 }
 
 

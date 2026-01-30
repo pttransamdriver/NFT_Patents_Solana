@@ -33,24 +33,43 @@ pub mod patent_nft {
         symbol: String,
         uri: String,
     ) -> Result<()> {
-        let state = &mut ctx.accounts.state;
-        
-        // Verify payment
+        // Input validation
         require!(
-            ctx.accounts.payer.lamports() >= state.minting_price,
-            PatentNFTError::InsufficientPayment
+            patent_number.len() > 0 && patent_number.len() <= 50,
+            PatentNFTError::InvalidPatentNumber
         );
+        require!(
+            name.len() > 0 && name.len() <= 32,
+            PatentNFTError::InvalidName
+        );
+        require!(
+            symbol.len() > 0 && symbol.len() <= 10,
+            PatentNFTError::InvalidSymbol
+        );
+        require!(
+            uri.len() > 0 && uri.len() <= 200,
+            PatentNFTError::InvalidUri
+        );
+
+        let state = &mut ctx.accounts.state;
 
         // Normalize and hash patent number
         let patent_hash = normalize_patent_id(&patent_number);
-        
-        // Check if patent already minted
+
+        // Check if patent already minted (this is enforced by init constraint, but double-check)
         require!(
             ctx.accounts.patent_registry.token_id == 0,
             PatentNFTError::PatentAlreadyMinted
         );
 
-        // Transfer payment to authority
+        // Assign token ID with overflow protection
+        let token_id = state.next_token_id;
+        state.next_token_id = state
+            .next_token_id
+            .checked_add(1)
+            .ok_or(PatentNFTError::TokenIdOverflow)?;
+
+        // Transfer payment to authority FIRST (fail fast before state changes)
         let ix = anchor_lang::solana_program::system_instruction::transfer(
             &ctx.accounts.payer.key(),
             &ctx.accounts.authority.key(),
@@ -63,10 +82,6 @@ pub mod patent_nft {
                 ctx.accounts.authority.to_account_info(),
             ],
         )?;
-
-        // Assign token ID
-        let token_id = state.next_token_id;
-        state.next_token_id += 1;
 
         // Store patent registry
         let registry = &mut ctx.accounts.patent_registry;
@@ -112,20 +127,41 @@ pub mod patent_nft {
         symbol: String,
         uri: String,
     ) -> Result<()> {
+        // Input validation
+        require!(
+            patent_number.len() > 0 && patent_number.len() <= 50,
+            PatentNFTError::InvalidPatentNumber
+        );
+        require!(
+            name.len() > 0 && name.len() <= 32,
+            PatentNFTError::InvalidName
+        );
+        require!(
+            symbol.len() > 0 && symbol.len() <= 10,
+            PatentNFTError::InvalidSymbol
+        );
+        require!(
+            uri.len() > 0 && uri.len() <= 200,
+            PatentNFTError::InvalidUri
+        );
+
         let state = &mut ctx.accounts.state;
-        
+
         // Normalize and hash patent number
         let patent_hash = normalize_patent_id(&patent_number);
-        
+
         // Check if patent already minted
         require!(
             ctx.accounts.patent_registry.token_id == 0,
             PatentNFTError::PatentAlreadyMinted
         );
 
-        // Assign token ID
+        // Assign token ID with overflow protection
         let token_id = state.next_token_id;
-        state.next_token_id += 1;
+        state.next_token_id = state
+            .next_token_id
+            .checked_add(1)
+            .ok_or(PatentNFTError::TokenIdOverflow)?;
 
         // Store patent registry
         let registry = &mut ctx.accounts.patent_registry;
@@ -179,9 +215,24 @@ pub mod patent_nft {
 
     /// Withdraw accumulated fees (admin only)
     pub fn withdraw(ctx: Context<Withdraw>, amount: u64) -> Result<()> {
-        let state = &ctx.accounts.state;
+        require!(amount > 0, PatentNFTError::InvalidAmount);
 
-        **ctx.accounts.state.to_account_info().try_borrow_mut_lamports()? -= amount;
+        let state = &ctx.accounts.state;
+        let state_account = ctx.accounts.state.to_account_info();
+
+        // Calculate minimum rent-exempt balance
+        let rent = Rent::get()?;
+        let min_balance = rent.minimum_balance(state_account.data_len());
+
+        // Ensure we don't withdraw below rent-exempt minimum
+        let current_balance = state_account.lamports();
+        require!(
+            current_balance >= amount.checked_add(min_balance).ok_or(PatentNFTError::MathOverflow)?,
+            PatentNFTError::InsufficientBalance
+        );
+
+        // Perform withdrawal
+        **state_account.try_borrow_mut_lamports()? -= amount;
         **ctx.accounts.authority.to_account_info().try_borrow_mut_lamports()? += amount;
 
         emit!(FeeWithdrawn {
@@ -411,6 +462,22 @@ pub enum PatentNFTError {
     PatentAlreadyMinted,
     #[msg("Unauthorized")]
     Unauthorized,
+    #[msg("Invalid patent number")]
+    InvalidPatentNumber,
+    #[msg("Invalid name")]
+    InvalidName,
+    #[msg("Invalid symbol")]
+    InvalidSymbol,
+    #[msg("Invalid URI")]
+    InvalidUri,
+    #[msg("Token ID overflow")]
+    TokenIdOverflow,
+    #[msg("Invalid amount")]
+    InvalidAmount,
+    #[msg("Insufficient balance")]
+    InsufficientBalance,
+    #[msg("Math overflow")]
+    MathOverflow,
 }
 
 

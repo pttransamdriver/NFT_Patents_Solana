@@ -25,7 +25,7 @@ pub mod psp_token {
     /// Purchase PSP tokens with SOL
     pub fn purchase_tokens(ctx: Context<PurchaseTokens>, sol_amount: u64) -> Result<()> {
         let state = &ctx.accounts.state;
-        
+
         require!(!state.paused, PSPTokenError::ContractPaused);
         require!(sol_amount > 0, PSPTokenError::InvalidAmount);
 
@@ -38,12 +38,28 @@ pub mod psp_token {
 
         require!(token_amount > 0, PSPTokenError::InsufficientPayment);
 
-        // Check max supply
+        // Check max supply with overflow protection
         let current_supply = ctx.accounts.mint.supply;
         let max_supply = 10_000_000 * 10u64.pow(9); // 10 million PSP
+        let new_supply = current_supply
+            .checked_add(token_amount)
+            .ok_or(PSPTokenError::MathOverflow)?;
         require!(
-            current_supply + token_amount <= max_supply,
+            new_supply <= max_supply,
             PSPTokenError::MaxSupplyExceeded
+        );
+
+        // Verify buyer has sufficient balance
+        let buyer_balance = ctx.accounts.buyer.to_account_info().lamports();
+        require!(
+            buyer_balance >= sol_amount,
+            PSPTokenError::InsufficientFunds
+        );
+
+        // Verify token account ownership
+        require!(
+            ctx.accounts.buyer_token_account.owner == ctx.accounts.buyer.key(),
+            PSPTokenError::InvalidTokenAccount
         );
 
         // Transfer SOL from buyer to program
@@ -85,7 +101,7 @@ pub mod psp_token {
     /// Redeem PSP tokens for SOL
     pub fn redeem_tokens(ctx: Context<RedeemTokens>, token_amount: u64) -> Result<()> {
         let state = &ctx.accounts.state;
-        
+
         require!(!state.paused, PSPTokenError::ContractPaused);
         require!(token_amount > 0, PSPTokenError::InvalidAmount);
 
@@ -96,12 +112,31 @@ pub mod psp_token {
             .checked_div(10u64.pow(9))
             .ok_or(PSPTokenError::MathOverflow)?;
 
+        // Verify token account ownership
         require!(
-            state.to_account_info().lamports() >= sol_amount,
+            ctx.accounts.user_token_account.owner == ctx.accounts.user.key(),
+            PSPTokenError::InvalidTokenAccount
+        );
+
+        // Verify user has sufficient tokens
+        require!(
+            ctx.accounts.user_token_account.amount >= token_amount,
+            PSPTokenError::InsufficientTokenBalance
+        );
+
+        // Calculate minimum rent-exempt balance for state account
+        let state_account = ctx.accounts.state.to_account_info();
+        let rent = Rent::get()?;
+        let min_balance = rent.minimum_balance(state_account.data_len());
+
+        // Ensure contract has enough balance (including rent-exempt minimum)
+        let current_balance = state_account.lamports();
+        require!(
+            current_balance >= sol_amount.checked_add(min_balance).ok_or(PSPTokenError::MathOverflow)?,
             PSPTokenError::InsufficientContractBalance
         );
 
-        // Burn tokens from user
+        // Burn tokens from user FIRST (fail fast)
         let cpi_accounts = Burn {
             mint: ctx.accounts.mint.to_account_info(),
             from: ctx.accounts.user_token_account.to_account_info(),
@@ -112,7 +147,7 @@ pub mod psp_token {
         token::burn(cpi_ctx, token_amount)?;
 
         // Transfer SOL to user
-        **ctx.accounts.state.to_account_info().try_borrow_mut_lamports()? -= sol_amount;
+        **state_account.try_borrow_mut_lamports()? -= sol_amount;
         **ctx.accounts.user.to_account_info().try_borrow_mut_lamports()? += sol_amount;
 
         emit!(TokensRedeemed {
@@ -127,12 +162,25 @@ pub mod psp_token {
     /// Spend tokens on behalf of user (for authorized contracts)
     pub fn spend_tokens_for(ctx: Context<SpendTokensFor>, amount: u64) -> Result<()> {
         let state = &ctx.accounts.state;
-        
+
         require!(!state.paused, PSPTokenError::ContractPaused);
-        
+        require!(amount > 0, PSPTokenError::InvalidAmount);
+
         // Check if spender is authorized
         let spender_state = &ctx.accounts.spender_state;
         require!(spender_state.authorized, PSPTokenError::UnauthorizedSpender);
+
+        // Verify token account ownership
+        require!(
+            ctx.accounts.user_token_account.owner == ctx.accounts.user.key(),
+            PSPTokenError::InvalidTokenAccount
+        );
+
+        // Verify user has sufficient tokens
+        require!(
+            ctx.accounts.user_token_account.amount >= amount,
+            PSPTokenError::InsufficientTokenBalance
+        );
 
         // Transfer tokens from user to program
         let cpi_accounts = Transfer {
@@ -216,12 +264,22 @@ pub mod psp_token {
 
     /// Withdraw SOL from contract (admin only)
     pub fn withdraw_sol(ctx: Context<WithdrawSol>, amount: u64) -> Result<()> {
+        require!(amount > 0, PSPTokenError::InvalidAmount);
+
+        let state_account = ctx.accounts.state.to_account_info();
+
+        // Calculate minimum rent-exempt balance
+        let rent = Rent::get()?;
+        let min_balance = rent.minimum_balance(state_account.data_len());
+
+        // Ensure we don't withdraw below rent-exempt minimum
+        let current_balance = state_account.lamports();
         require!(
-            ctx.accounts.state.to_account_info().lamports() >= amount,
+            current_balance >= amount.checked_add(min_balance).ok_or(PSPTokenError::MathOverflow)?,
             PSPTokenError::InsufficientContractBalance
         );
 
-        **ctx.accounts.state.to_account_info().try_borrow_mut_lamports()? -= amount;
+        **state_account.try_borrow_mut_lamports()? -= amount;
         **ctx.accounts.authority.to_account_info().try_borrow_mut_lamports()? += amount;
 
         Ok(())
@@ -479,6 +537,12 @@ pub enum PSPTokenError {
     InsufficientContractBalance,
     #[msg("Unauthorized spender")]
     UnauthorizedSpender,
+    #[msg("Insufficient funds")]
+    InsufficientFunds,
+    #[msg("Invalid token account")]
+    InvalidTokenAccount,
+    #[msg("Insufficient token balance")]
+    InsufficientTokenBalance,
 }
 
 
